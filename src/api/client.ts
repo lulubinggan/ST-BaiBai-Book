@@ -1,5 +1,8 @@
 import { getContext } from '@/st/context';
-import type { ApiChannel } from './settings';
+import { shallowRef } from 'vue';
+import type { ApiChannel, CompletionChannel } from './settings';
+import { describeFlexTraffic } from './vertex';
+import { requestVertexCompletion } from './vertexCompletion';
 
 /**
  * 通过 SillyTavern 的服务端代理调用任意 OpenAI 兼容端点。
@@ -89,10 +92,11 @@ async function withTimeout<T>(
  * 发起一次补全请求,返回文本内容。
  */
 export async function requestCompletion(
-  channel: ApiChannel,
+  channel: CompletionChannel,
   messages: ChatMsg[],
   opts: RequestOptions = {},
 ): Promise<string> {
+  if ('provider' in channel) return (await requestVertexCompletion(channel, messages, opts.signal)).content;
   return requestCompletionAtUrl(channel, messages, normalizeUrl(channel.url), opts);
 }
 
@@ -303,15 +307,51 @@ export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptio
   return content;
 }
 
-/** 连通性测试:发一条极短请求 */
-export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; message: string }> {
+type ChannelTestResult = { ok: boolean; message: string };
+type ChannelTestEntry = {
+  id: number;
+  time: number;
+  channel: string;
+  model: string;
+  mode: string;
+  status: '成功' | '失败' | '已取消';
+};
+
+// 只在本次打开酒馆期间保存测试状态，不记录请求正文、响应或凭证。
+export const channelTestHistory = shallowRef<ChannelTestEntry[]>([]);
+let testSequence = 0;
+const TEST_MESSAGES: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字符即可。' }];
+
+/** 连通性测试：只发一条简短消息，摘要内容不参与测试。 */
+export async function testChannel(channel: CompletionChannel, signal?: AbortSignal): Promise<ChannelTestResult> {
+  const entry = {
+    id: ++testSequence,
+    time: Date.now(),
+    channel: channel.name || '未命名渠道',
+    model: channel.model,
+    mode: 'provider' in channel ? channel.flex ? 'Vertex AI Flex' : 'Vertex AI 标准' : '',
+  };
+  let result: ChannelTestResult;
+  try {
+    if ('provider' in channel) {
+      const reply = await requestVertexCompletion({ ...channel }, TEST_MESSAGES, signal);
+      const traffic = channel.flex ? describeFlexTraffic(reply.trafficType) : '';
+      result = { ok: true, message: ['连通正常', reply.content.slice(0, 40), traffic].filter(Boolean).join(' · ') };
+    } else {
+      result = await testOpenAiChannel(channel, signal);
+    }
+  } catch (error) {
+    result = { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+  const status: ChannelTestEntry['status'] = signal?.aborted ? '已取消' : result.ok ? '成功' : '失败';
+  channelTestHistory.value = [{ ...entry, status }, ...channelTestHistory.value].slice(0, 50);
+  return result;
+}
+
+async function testOpenAiChannel(channel: ApiChannel, signal?: AbortSignal): Promise<ChannelTestResult> {
   const primaryUrl = normalizeUrl(channel.url);
   try {
-    const reply = await requestCompletionAtUrl(
-      channel,
-      [{ role: 'user', content: '回复"ok"两个字符即可。' }],
-      primaryUrl,
-    );
+    const reply = await requestCompletionAtUrl(channel, TEST_MESSAGES, primaryUrl, { signal });
     const changed = channel.url.trim().replace(/\/+$/, '') !== primaryUrl;
     if (changed) channel.url = primaryUrl;
     return {
@@ -319,7 +359,7 @@ export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; m
       message: `连通正常${changed ? `,已采用:${primaryUrl}` : ''},返回:${reply.slice(0, 40)}`,
     };
   } catch (e) {
-    if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) {
+    if (signal?.aborted || !(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) {
       return { ok: false, message: e instanceof Error ? e.message : String(e) };
     }
 
@@ -328,11 +368,7 @@ export async function testChannel(channel: ApiChannel): Promise<{ ok: boolean; m
       return { ok: false, message: e.message };
     }
     try {
-      const reply = await requestCompletionAtUrl(
-        channel,
-        [{ role: 'user', content: '回复"ok"两个字符即可。' }],
-        fallbackUrl,
-      );
+      const reply = await requestCompletionAtUrl(channel, TEST_MESSAGES, fallbackUrl, { signal });
       channel.url = fallbackUrl;
       return {
         ok: true,

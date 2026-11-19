@@ -1,5 +1,5 @@
 import { getContext } from '@/st/context';
-import { normalizeVertexConnection } from './vertex';
+import { LEGACY_VERTEX_CHANNEL_ID, normalizeVertexConnection } from './vertex';
 import { DEFAULT_VERTEX_TEXT, type VertexTextSettings } from './vertexCompletion';
 import { normalizeTemplate, type VarTemplate } from '@/memory/types';
 import { reactive, watch } from 'vue';
@@ -50,8 +50,8 @@ export interface ApiChannel {
 }
 
 export type TaskType = 'summary' | 'resummary';
-// Vertex AI 凭证和配置属于本插件，渠道同步只处理原有的共享渠道。
-export const VERTEX_CHANNEL_ID = 'bbs-vertex-ai';
+export type VertexChannel = VertexTextSettings & { id: string; provider: 'vertex'; name: string };
+export type CompletionChannel = ApiChannel | VertexChannel;
 
 /** 自定义提示词:空串表示沿用 prompts.ts 内置模板,非空则整体覆盖该任务的模板。 */
 export interface CustomPrompts {
@@ -199,7 +199,8 @@ export interface ApiSettings {
   channels: ApiChannel[];
   /** 各任务指派的渠道 id */
   assignments: Record<TaskType, string>;
-  vertex: VertexTextSettings;
+  /** Vertex AI 渠道归柏宝书管理，凭证单独存放。 */
+  vertexChannels: VertexChannel[];
   /** 自动摘要开关。开启即一并启用:自动隐藏、正文时间标签、积压拦截(不再各自独立开关)。 */
   autoSummaryEnabled: boolean;
   /**
@@ -348,7 +349,7 @@ function defaults(): ApiSettings {
     },
     channels: [],
     assignments: { summary: '', resummary: '' },
-    vertex: { ...DEFAULT_VERTEX_TEXT },
+    vertexChannels: [],
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
     injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, knowledge: true },
@@ -378,15 +379,16 @@ function defaults(): ApiSettings {
 function normalize(raw: unknown): ApiSettings {
   if (!raw || typeof raw !== 'object') return defaults();
   const d = defaults();
-  const merged = { ...d, ...(raw as Partial<ApiSettings>) };
-  const vertex = (raw as Partial<ApiSettings>).vertex;
-  merged.vertex = {
-    ...normalizeVertexConnection(vertex, DEFAULT_VERTEX_TEXT),
-    maxTokens: typeof vertex?.maxTokens === 'number' && Number.isFinite(vertex.maxTokens) && vertex.maxTokens >= 1
-      ? Math.floor(vertex.maxTokens) : DEFAULT_VERTEX_TEXT.maxTokens,
-    timeoutSec: typeof vertex?.timeoutSec === 'number' && Number.isFinite(vertex.timeoutSec) && vertex.timeoutSec >= 1
-      ? Math.floor(vertex.timeoutSec) : DEFAULT_VERTEX_TEXT.timeoutSec,
-  };
+  const { vertex, ...stored } = raw as Partial<ApiSettings> & { vertex?: Partial<VertexTextSettings> };
+  const merged = { ...d, ...stored };
+  // 保留旧渠道 ID，让原来的摘要/总结指派和本机凭证继续可用。
+  if (Array.isArray(stored.vertexChannels)) {
+    merged.vertexChannels = stored.vertexChannels.filter(c => c && typeof c === 'object').map(normalizeVertexChannel);
+  } else if (vertex && typeof vertex === 'object') {
+    merged.vertexChannels = [normalizeVertexChannel({ ...vertex, id: LEGACY_VERTEX_CHANNEL_ID })];
+  } else {
+    merged.vertexChannels = d.vertexChannels;
+  }
   // prompts 是嵌套对象,展开合并不会补全缺字段,单独兜底(老数据没有 prompts 键时回退默认)
   merged.prompts = { ...d.prompts, ...((raw as Partial<ApiSettings>).prompts ?? {}) };
   // ui 同为嵌套对象,逐字段兜底(老数据没有 ui 键时回退默认,值非字符串时丢弃)
@@ -583,6 +585,19 @@ function normalizeChannel(c: Partial<ApiChannel>): ApiChannel {
   };
 }
 
+function normalizeVertexChannel(c: Partial<VertexChannel>): VertexChannel {
+  return {
+    ...normalizeVertexConnection(c, DEFAULT_VERTEX_TEXT),
+    id: typeof c.id === 'string' && c.id ? c.id : newVertexChannel().id,
+    name: typeof c.name === 'string' ? c.name : 'Vertex AI',
+    provider: 'vertex',
+    maxTokens: typeof c.maxTokens === 'number' && Number.isFinite(c.maxTokens) && c.maxTokens >= 1
+      ? Math.floor(c.maxTokens) : DEFAULT_VERTEX_TEXT.maxTokens,
+    timeoutSec: typeof c.timeoutSec === 'number' && Number.isFinite(c.timeoutSec) && c.timeoutSec >= 1
+      ? Math.floor(c.timeoutSec) : DEFAULT_VERTEX_TEXT.timeoutSec,
+  };
+}
+
 // import 阶段 ST 往往尚未就绪,先以默认值建 reactive;真实值由 hydrateSettings 灌入。
 export const apiSettings = reactive<ApiSettings>(defaults());
 
@@ -611,7 +626,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.vector = src.vector;
   target.channels = src.channels;
   target.assignments = src.assignments;
-  target.vertex = src.vertex;
+  target.vertexChannels = src.vertexChannels;
   target.autoSummaryEnabled = src.autoSummaryEnabled;
   target.summaryOnlyMode = src.summaryOnlyMode;
   target.injection = src.injection;
@@ -681,7 +696,7 @@ function applySharedChannels(store: SharedChannelsStore): void {
   sharedChannelsFingerprint = fingerprint;
 
   const ids = new Set(apiSettings.channels.map(channel => channel.id));
-  ids.add(VERTEX_CHANNEL_ID);
+  for (const channel of apiSettings.vertexChannels) ids.add(channel.id);
   if (apiSettings.assignments.summary && !ids.has(apiSettings.assignments.summary)) {
     apiSettings.assignments.summary = '';
   }
@@ -869,6 +884,8 @@ export function hydrateSettings(): void {
     // 老用户:server 已有 api 设置但还没同步过界面偏好 → 把旧 localStorage 的主题/导航迁进来并落盘一次
     if (!('ui' in (stored as object))) {
       migrateLegacyUiPrefs(apiSettings);
+    }
+    if (!('ui' in stored) || 'vertex' in stored) {
       ctx.extensionSettings[SETTINGS_KEY] = JSON.parse(JSON.stringify(apiSettings));
       ctx.saveSettingsDebounced?.();
     }
@@ -953,6 +970,11 @@ export function newChannel(): ApiChannel {
   };
 }
 
+export function newVertexChannel(): VertexChannel {
+  chanSeq += 1;
+  return { ...DEFAULT_VERTEX_TEXT, id: `vertex-ch_${Date.now()}_${chanSeq}`, provider: 'vertex', name: 'Vertex AI' };
+}
+
 /** 当前单角色聊天的角色名;群聊或未进入聊天时返回 null(群聊不参与排除)。 */
 export function currentCharName(): string | null {
   const ctx = getContext();
@@ -992,10 +1014,10 @@ export function engineActiveHere(): boolean {
   return apiSettings.enabled && !isCurrentChatExcluded();
 }
 
-export function getChannelForTask(task: TaskType): ApiChannel | null {
+export function getChannelForTask(task: TaskType): CompletionChannel | null {
   const id = apiSettings.assignments[task];
   if (!id) return null;
-  return apiSettings.channels.find(c => c.id === id) ?? null;
+  return apiSettings.channels.find(c => c.id === id) ?? apiSettings.vertexChannels.find(c => c.id === id) ?? null;
 }
 
 /**

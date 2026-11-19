@@ -1,7 +1,6 @@
 import type { ChatMsg } from '@/api/client';
 import { mainApiAvailable, requestCompletion, requestViaMainApi } from '@/api/client';
-import { apiSettings, engineActiveHere, getChannelForTask, VERTEX_CHANNEL_ID } from '@/api/settings';
-import { requestVertexCompletion } from '@/api/vertexCompletion';
+import { apiSettings, engineActiveHere, getChannelForTask } from '@/api/settings';
 import type { TaskType } from '@/api/settings';
 import type { STMessage, WorldInfoEntry } from '@/st/context';
 import { getContext, getCheckWorldInfo, getEjsTemplate, setMessageText } from '@/st/context';
@@ -967,13 +966,6 @@ async function syncWindowHiddenState(chat: STMessage[]): Promise<void> {
 function resolveSender(
   task: TaskType,
 ): { send: (messages: ChatMsg[]) => Promise<string>; label: string } | { error: string } {
-  if (apiSettings.assignments[task] === VERTEX_CHANNEL_ID) {
-    const config = { ...apiSettings.vertex };
-    return {
-      send: async messages => (await requestVertexCompletion(config, messages)).text,
-      label: 'Vertex AI (' + config.model + ')',
-    };
-  }
   const channel = getChannelForTask(task);
   if (channel) {
     return { send: messages => requestCompletion(channel, messages), label: `渠道「${channel.name}」(${channel.model})` };

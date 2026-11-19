@@ -4,9 +4,10 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
-import VertexSettings from './VertexSettings.vue';
-import { fetchModels, testChannel } from '@/api/client';
-import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, VERTEX_CHANNEL_ID, type ApiChannel, type Verbosity } from '@/api/settings';
+import VertexCredentials from '@/components/VertexCredentials.vue';
+import { channelTestHistory, fetchModels, testChannel } from '@/api/client';
+import { clearVertexCredential, hasVertexCredential, VERTEX_MODELS } from '@/api/vertex';
+import { apiSettings, newChannel, newVertexChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type CompletionChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
   JAILBREAK_PROMPT,
@@ -29,7 +30,7 @@ import { ui, THEMES, ORB_SHAPES, type NavPosition } from '@/state/ui';
 import { uploadOrbImage } from '@/st/upload';
 import { toast } from '@/st/toast';
 import { versionedAssetUrl } from '@/version';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 
 const navOptions: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },
@@ -58,10 +59,10 @@ const VERBOSITY_OPTIONS: { value: Verbosity; label: string }[] = [
 ];
 
 /** 任务指派下拉:空串 = 跟随主 API,其余为副渠道 id(未命名渠道给个占位名,免空白选项) */
+const allChannels = computed(() => [...apiSettings.channels, ...apiSettings.vertexChannels]);
 const channelOptions = computed(() => [
   { value: '', label: '跟随主 API' },
-  { value: VERTEX_CHANNEL_ID, label: 'Vertex AI' },
-  ...apiSettings.channels.map(c => ({ value: c.id, label: c.name || '未命名渠道' })),
+  ...allChannels.value.map(c => ({ value: c.id, label: c.name || '未命名渠道' })),
 ]);
 
 /* —— 悬浮球自定义图标:选图 → 压缩上传到 ST 服务器 → 存路径串(跨设备同步) —— */
@@ -89,31 +90,34 @@ function resetOrbImage() {
   ui.orbImage = '';
 }
 
-/* —— 渠道:列表只读展示,编辑/新建都在弹窗里进行,避免一长列表平铺误触。
-   两套独立渠道:'api'=副 API(摘要/总结),'vector'=向量记忆。弹窗按 scope 操作对应列表。 —— */
-type ChannelScope = 'api' | 'vector';
+/* —— 副 API 渠道:编辑和新建共用一个弹窗。 —— */
 // editingId:正在编辑的「已有渠道」id;新建时为 null。仅用于「完成」时定位写回目标。
 const editingId = ref<string | null>(null);
-const editingScope = ref<ChannelScope>('api');
-// 当前 scope 对应的渠道数组(增删/查找都走它)。向量已改扁平端点,只剩副 API 用渠道。
-function channelsOf(_scope: ChannelScope): ApiChannel[] {
-  return apiSettings.channels;
-}
 // 编辑用「草稿副本」:v-model 全改在草稿上,只有点「完成」才写回 apiSettings(避免每敲一字就触发存盘)。
-// 弹窗开关也以它为准:草稿存在 = 弹窗打开。
-const editingChannel = ref<ApiChannel | null>(null);
-// 深拷贝渠道(纯数据,JSON 即可),切断与 apiSettings 真身的引用
-function cloneChannel(ch: ApiChannel): ApiChannel {
-  return JSON.parse(JSON.stringify(ch)) as ApiChannel;
-}
+const editingChannel = ref<CompletionChannel | null>(null);
+const openAiDraft = computed(() => {
+  const draft = editingChannel.value;
+  return draft && !('provider' in draft) ? draft : null;
+});
+const vertexDraft = computed(() => {
+  const draft = editingChannel.value;
+  return draft && 'provider' in draft ? draft : null;
+});
+const vertexCredentials = ref<InstanceType<typeof VertexCredentials> | null>(null);
+const credentialsBusy = ref(false);
+const editorBusy = ref(false);
+const channelBusy = computed(() => credentialsBusy.value || editorBusy.value);
+const testRunning = ref(false);
+const testMessage = ref('');
+let testController: AbortController | null = null;
 // 密钥默认隐藏;每次打开/关闭弹窗都复位,避免密钥意外保持明文
 const showKey = ref(false);
 
 // 排除参数:内部存 string[],编辑时用逗号分隔的单行文本承载,读/写两向转换。
 const excludeParamsText = computed<string>({
-  get: () => editingChannel.value?.excludeParams.join(', ') ?? '',
+  get: () => openAiDraft.value?.excludeParams.join(', ') ?? '',
   set: v => {
-    const ch = editingChannel.value;
+    const ch = openAiDraft.value;
     if (!ch) return;
     ch.excludeParams = v
       .split(',')
@@ -122,76 +126,118 @@ const excludeParamsText = computed<string>({
   },
 });
 
-function addChannel(scope: ChannelScope = 'api') {
-  showKey.value = false;
-  editingScope.value = scope;
-  editingId.value = null; // null = 新建,完成时 push
-  editingChannel.value = newChannel(); // 草稿,尚未进 apiSettings
+function addChannel(provider: 'openai' | 'vertex') {
+  editingChannel.value = provider === 'vertex' ? newVertexChannel() : newChannel();
 }
-function openChannel(id: string, scope: ChannelScope = 'api') {
-  const src = channelsOf(scope).find(c => c.id === id);
+function openChannel(id: string) {
+  const src = allChannels.value.find(c => c.id === id);
   if (!src) return;
-  showKey.value = false;
-  editingScope.value = scope;
   editingId.value = id;
-  editingChannel.value = cloneChannel(src); // 编辑草稿副本,不动真身
+  editingChannel.value = 'provider' in src ? { ...src } : { ...src, excludeParams: [...src.excludeParams] };
 }
-/** 取消(× / 点遮罩):丢弃草稿,不写回 apiSettings(无论新建还是编辑,改动都作废)。 */
-function closeChannel() {
+function resetChannelEditor() {
+  testController?.abort();
+  testMessage.value = '';
+  modelMenuOpen.value = false;
+  modelQuery.value = '';
   showKey.value = false;
   editingId.value = null;
   editingChannel.value = null;
 }
-/** 完成:把草稿写回 apiSettings —— 新建则 push,编辑则按 id 覆盖。此时才触发存盘。 */
-function confirmChannel() {
+
+async function closeChannel() {
+  if (channelBusy.value) return;
+  testController?.abort();
+  if (!editingId.value && vertexDraft.value && hasVertexCredential(vertexDraft.value.id)) {
+    editorBusy.value = true;
+    try {
+      await clearVertexCredential(vertexDraft.value.id);
+    } catch (error) {
+      testMessage.value = error instanceof Error ? error.message : String(error);
+      return;
+    } finally {
+      editorBusy.value = false;
+    }
+  }
+  resetChannelEditor();
+}
+
+onBeforeUnmount(() => {
+  testController?.abort();
+  if (!editingId.value && vertexDraft.value && hasVertexCredential(vertexDraft.value.id)) {
+    void clearVertexCredential(vertexDraft.value.id).catch(() => {});
+  }
+});
+
+async function confirmChannel() {
   const draft = editingChannel.value;
-  if (draft) {
+  if (!draft || channelBusy.value || testRunning.value) return;
+  editorBusy.value = true;
+  try {
+    if ('provider' in draft && vertexCredentials.value && !await vertexCredentials.value.savePending()) return;
     draft.timeoutSec =
       Number.isFinite(draft.timeoutSec) && draft.timeoutSec > 0
         ? Math.floor(draft.timeoutSec)
-        : 180;
-    const list = channelsOf(editingScope.value);
-    if (editingId.value) {
-      const idx = list.findIndex(c => c.id === editingId.value);
-      if (idx >= 0) list[idx] = draft;
-      else list.push(draft); // 编辑期间原渠道被删等异常 → 兜底为新增
+        : 'provider' in draft ? 0 : 180;
+    if ('provider' in draft) {
+      const idx = apiSettings.vertexChannels.findIndex(c => c.id === draft.id);
+      if (idx >= 0) apiSettings.vertexChannels[idx] = draft;
+      else apiSettings.vertexChannels.push(draft);
     } else {
-      list.push(draft);
+      const idx = apiSettings.channels.findIndex(c => c.id === draft.id);
+      if (idx >= 0) apiSettings.channels[idx] = draft;
+      else apiSettings.channels.push(draft);
     }
+    resetChannelEditor();
+  } finally {
+    editorBusy.value = false;
   }
-  showKey.value = false;
-  editingId.value = null;
-  editingChannel.value = null;
 }
 // 删除渠道前的二次确认:点删除先开确认弹窗,确认后才真正删。
 const confirmDeleteOpen = ref(false);
 function askRemoveChannel() {
   confirmDeleteOpen.value = true;
 }
-function confirmRemoveChannel() {
+async function confirmRemoveChannel() {
   confirmDeleteOpen.value = false;
-  // 删除针对「已有渠道」(editingId);新建草稿尚未入库,等同直接丢弃草稿
-  if (editingId.value) removeChannel(editingId.value);
-  editingId.value = null;
-  editingChannel.value = null;
-}
-function removeChannel(id: string) {
-  const scope = editingScope.value;
-  const list = channelsOf(scope);
-  const idx = list.findIndex(c => c.id === id);
-  if (idx >= 0) list.splice(idx, 1);
-  // 清理指派:副 API 清两类摘要指派(向量已改扁平端点,不再走渠道系统)
-  if (scope === 'api') {
+  if (channelBusy.value) return;
+  const id = editingId.value;
+  if (!id) return closeChannel();
+  testController?.abort();
+  const list = vertexDraft.value ? apiSettings.vertexChannels : apiSettings.channels;
+  editorBusy.value = true;
+  try {
+    if (vertexDraft.value) await clearVertexCredential(id);
+    const idx = list.findIndex(c => c.id === id);
+    if (idx >= 0) list.splice(idx, 1);
     if (apiSettings.assignments.summary === id) apiSettings.assignments.summary = '';
     if (apiSettings.assignments.resummary === id) apiSettings.assignments.resummary = '';
+    resetChannelEditor();
+  } catch (error) {
+    testMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    editorBusy.value = false;
   }
 }
 
-const testing = ref<Record<string, string>>({});
-async function doTest(ch: ApiChannel) {
-  testing.value[ch.id] = '测试中…';
-  const r = await testChannel(ch);
-  testing.value[ch.id] = r.message;
+async function doTest(ch: CompletionChannel) {
+  if (channelBusy.value || testRunning.value) return;
+  const controller = new AbortController();
+  testController = controller;
+  testRunning.value = true;
+  testMessage.value = '测试中…';
+  try {
+    if ('provider' in ch && vertexCredentials.value && !await vertexCredentials.value.savePending()) {
+      testMessage.value = '';
+      return;
+    }
+    if (controller.signal.aborted) return;
+    const result = await testChannel(ch, controller.signal);
+    if (!controller.signal.aborted) testMessage.value = result.message;
+  } finally {
+    testController = null;
+    testRunning.value = false;
+  }
 }
 
 // 各渠道拉取到的模型列表 + 拉取状态
@@ -199,14 +245,14 @@ const models = ref<Record<string, string[]>>({});
 const loadingModels = ref<Record<string, boolean>>({});
 async function pullModels(ch: ApiChannel) {
   loadingModels.value[ch.id] = true;
-  testing.value[ch.id] = '';
+  testMessage.value = '';
   try {
     const list = await fetchModels(ch);
     models.value[ch.id] = list;
     if (list.length && !ch.model) ch.model = list[0];
-    if (!list.length) testing.value[ch.id] = '未返回任何模型';
+    if (!list.length && editingChannel.value === ch) testMessage.value = '未返回任何模型';
   } catch (e) {
-    testing.value[ch.id] = e instanceof Error ? e.message : String(e);
+    if (editingChannel.value === ch) testMessage.value = e instanceof Error ? e.message : String(e);
   } finally {
     loadingModels.value[ch.id] = false;
   }
@@ -217,6 +263,7 @@ const modelMenuOpen = ref(false);
 const modelQuery = ref(''); // 聚焦后用户输入的过滤词;失焦时清空
 // 已拉取到的当前渠道模型列表
 const modelList = computed<string[]>(() => {
+  if (vertexDraft.value) return VERTEX_MODELS.map(model => model.id);
   const id = editingChannel.value?.id;
   return id ? models.value[id] ?? [] : [];
 });
@@ -914,29 +961,44 @@ function exportPublicApiDocument() {
         </div>
         <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
 
-        <Collapsible title="Vertex AI" :open="false">
-          <VertexSettings />
-        </Collapsible>
-
         <hr class="bbs-rule" />
 
         <!-- 渠道:顶部添加按钮 + 紧凑只读列表(点行进弹窗编辑),不再一长列表单平铺 -->
         <div class="bbs-channel-bar">
           <span class="bbs-field-label">渠道</span>
-          <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('api')">
-            <Icon name="plus" /> 添加渠道
-          </button>
+          <div class="bbs-channel-actions">
+            <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('openai')">
+              <Icon name="plus" /> 添加渠道
+            </button>
+            <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('vertex')">
+              <Icon name="plus" /> 添加 Vertex AI 渠道
+            </button>
+          </div>
         </div>
 
-        <ul v-if="apiSettings.channels.length" class="bbs-channel-list">
-          <li v-for="ch in apiSettings.channels" :key="ch.id" class="bbs-channel-item">
+        <ul v-if="allChannels.length" class="bbs-channel-list">
+          <li v-for="ch in allChannels" :key="ch.id" class="bbs-channel-item">
             <button class="bbs-channel-open" type="button" @click="openChannel(ch.id)">
               <span class="bbs-channel-item-name">{{ ch.name || '未命名渠道' }}</span>
               <span class="bbs-channel-item-model">{{ ch.model || '未设模型' }}</span>
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
+        <p v-else class="bbs-field-hint">添加渠道后，即可为摘要或总结选择使用的 API。</p>
+
+        <div class="bbs-channel-history">
+          <Collapsible title="请求历史" :open="false">
+            <p class="bbs-field-hint">保留本次会话最近 50 条渠道测试。</p>
+            <ul v-if="channelTestHistory.length" class="bbs-channel-list">
+              <li v-for="entry in channelTestHistory" :key="entry.id" class="bbs-test-entry">
+                <strong>连通性测试 · {{ entry.status }}</strong>
+                <span>{{ [entry.channel, entry.model, entry.mode].filter(Boolean).join(' · ') }}</span>
+                <time :datetime="new Date(entry.time).toISOString()">{{ new Date(entry.time).toLocaleTimeString() }}</time>
+              </li>
+            </ul>
+            <p v-else class="bbs-field-hint">暂无渠道测试记录。</p>
+          </Collapsible>
+        </div>
       </Collapsible>
 
       <!-- 摘要设置 -->
@@ -1676,22 +1738,29 @@ function exportPublicApiDocument() {
       <div v-if="editingChannel" class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑渠道">
         <header class="bbs-modal-head">
           <span class="bbs-modal-title">编辑渠道</span>
-          <button class="bbs-icon-mini" type="button" title="关闭" @click="closeChannel"><Icon name="close" /></button>
+          <button class="bbs-icon-mini" type="button" title="关闭" :disabled="channelBusy" @click="closeChannel"><Icon name="close" /></button>
         </header>
 
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">渠道名</span>
           <input v-model="editingChannel.name" class="bbs-input" placeholder="渠道名" />
         </label>
-        <label class="bbs-modal-field">
+        <VertexCredentials
+          v-if="vertexDraft"
+          :key="vertexDraft.id"
+          ref="vertexCredentials"
+          :channel-id="vertexDraft.id"
+          @busy-change="credentialsBusy = $event"
+        />
+        <label v-if="openAiDraft" class="bbs-modal-field">
           <span class="bbs-modal-label">API 地址</span>
-          <input v-model="editingChannel.url" class="bbs-input" placeholder="如 https://api.openai.com/v1" />
+          <input v-model="openAiDraft.url" class="bbs-input" placeholder="如 https://api.openai.com/v1" />
         </label>
-        <label class="bbs-modal-field">
+        <label v-if="openAiDraft" class="bbs-modal-field">
           <span class="bbs-modal-label">API 密钥</span>
           <div class="bbs-model-row">
             <input
-              v-model="editingChannel.key"
+              v-model="openAiDraft.key"
               class="bbs-input"
               :type="showKey ? 'text' : 'password'"
               placeholder="API 密钥"
@@ -1729,53 +1798,65 @@ function exportPublicApiDocument() {
                   :key="m"
                   class="bbs-combo-item"
                   :class="{ 'is-active': m === editingChannel.model }"
-                  @mousedown.prevent="pickModel(m)"
+                  @mousedown.prevent
+                  @click="pickModel(m)"
                 >
                   {{ m }}
                 </li>
               </ul>
             </div>
             <button
+              v-if="openAiDraft"
               class="bbs-icon-mini"
               type="button"
               :title="loadingModels[editingChannel.id] ? '拉取中…' : '拉取模型'"
               :disabled="loadingModels[editingChannel.id]"
-              @click="pullModels(editingChannel)"
+              @click="pullModels(openAiDraft)"
             >
               <Icon name="refresh" />
             </button>
           </div>
         </label>
-        <div class="bbs-channel-row">
-          <label class="bbs-mini-field">
+        <div class="bbs-channel-row" :class="{ 'bbs-channel-row-vertex': vertexDraft }">
+          <label v-if="openAiDraft" class="bbs-mini-field">
             <span>温度</span>
-            <input v-model.number="editingChannel.temperature" class="bbs-input" type="number" step="0.1" min="0" max="2" />
+            <input v-model.number="openAiDraft.temperature" class="bbs-input" type="number" step="0.1" min="0" max="2" />
+          </label>
+          <label v-if="vertexDraft" class="bbs-mini-field">
+            <span>地区</span>
+            <input v-model.trim="vertexDraft.location" class="bbs-input" placeholder="global" />
           </label>
           <label class="bbs-mini-field">
             <span>最大 token</span>
-            <input v-model.number="editingChannel.maxTokens" class="bbs-input" type="number" step="256" min="256" />
+            <input v-model.number="editingChannel.maxTokens" class="bbs-input" type="number" :step="vertexDraft ? 1 : 256" :min="vertexDraft ? 1 : 256" />
           </label>
           <label class="bbs-mini-field">
             <span>超时(秒)</span>
-            <input v-model.number="editingChannel.timeoutSec" class="bbs-input" type="number" step="10" min="1" />
+            <input v-model.number="editingChannel.timeoutSec" class="bbs-input" type="number" :step="vertexDraft ? 1 : 10"
+              :min="vertexDraft ? 0 : 1" :max="vertexDraft?.flex ? 1800 : undefined" />
           </label>
           <!-- 思考强度:自绘下拉(跟随主题;原生 select 的弹出层由系统渲染,主题管不到)。
                auto 是显式选项,值为空串 = 不发送该参数 -->
-          <div class="bbs-mini-field">
+          <div v-if="openAiDraft" class="bbs-mini-field">
             <span>思考强度</span>
             <BbsSelect
-              v-model="editingChannel.reasoningEffort"
+              v-model="openAiDraft.reasoningEffort"
               :options="REASONING_EFFORT_OPTIONS"
               aria-label="思考强度"
             />
           </div>
         </div>
-        <span class="bbs-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
-        <label class="bbs-switch-row">
-          <span class="bbs-modal-label">流式传输</span>
-          <input v-model="editingChannel.stream" type="checkbox" class="bbs-checkbox" />
+        <span v-if="openAiDraft" class="bbs-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
+        <span v-else class="bbs-field-hint">超时填 0 时使用默认值，标准 180 秒，Flex 600 秒。</span>
+        <label v-if="vertexDraft" class="bbs-switch-row">
+          <span class="bbs-modal-label">Flex 模式（需使用 global）</span>
+          <input v-model="vertexDraft.flex" type="checkbox" class="bbs-checkbox" />
         </label>
-        <label class="bbs-modal-field">
+        <label v-if="openAiDraft" class="bbs-switch-row">
+          <span class="bbs-modal-label">流式传输</span>
+          <input v-model="openAiDraft.stream" type="checkbox" class="bbs-checkbox" />
+        </label>
+        <label v-if="openAiDraft" class="bbs-modal-field">
           <span class="bbs-modal-label">排除参数</span>
           <input
             v-model="excludeParamsText"
@@ -1785,19 +1866,19 @@ function exportPublicApiDocument() {
           />
           <span class="bbs-field-hint">这些参数会在发请求前从请求体里删除,用于规避不接受该参数的兼容端点报错。逗号分隔,留空则不排除。</span>
         </label>
-        <p v-if="testing[editingChannel.id]" class="bbs-channel-test">{{ testing[editingChannel.id] }}</p>
+        <p v-if="testMessage" class="bbs-channel-test" role="status">{{ testMessage }}</p>
 
         <footer class="bbs-modal-foot">
           <!-- 删除靠左、与右侧主操作拉开,破坏性动作不与「完成」相邻,降低误触。
                删除:始终显示文字;测试:PC 显「测试渠道」,移动端只显「测试」(短版,省版面) -->
-          <button class="bbs-btn bbs-btn-danger" type="button" @click="askRemoveChannel">
+          <button class="bbs-btn bbs-btn-danger" type="button" :disabled="channelBusy" @click="askRemoveChannel">
             <Icon name="trash" /> 删除
           </button>
           <span class="bbs-modal-foot-spacer"></span>
-          <button class="bbs-btn" type="button" title="测试渠道" @click="doTest(editingChannel)">
+          <button class="bbs-btn" type="button" title="测试渠道" :disabled="channelBusy || testRunning" @click="doTest(editingChannel)">
             <Icon name="plug" /> <span class="bbs-btn-label-full">测试渠道</span><span class="bbs-btn-label-short">测试</span>
           </button>
-          <button class="bbs-btn bbs-btn-primary" type="button" @click="confirmChannel">完成</button>
+          <button class="bbs-btn bbs-btn-primary" type="button" :disabled="channelBusy || testRunning" @click="confirmChannel">完成</button>
         </footer>
 
         <!-- 删除渠道二次确认:叠在渠道弹窗之上。置于 v-if="editingChannel" 块内,
@@ -2309,6 +2390,31 @@ function exportPublicApiDocument() {
   gap: 12px;
   margin-bottom: 12px;
 }
+.bbs-channel-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.bbs-channel-history {
+  margin-top: 12px;
+}
+.bbs-test-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 8px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--bbs-line);
+}
+.bbs-test-entry span {
+  grid-area: 2 / 1 / 3 / -1;
+  color: var(--bbs-ink-muted);
+  overflow-wrap: anywhere;
+}
+.bbs-test-entry time {
+  color: var(--bbs-ink-muted);
+}
 
 /* 渠道:紧凑只读列表,每渠道一行,点行进弹窗编辑 */
 .bbs-channel-list {
@@ -2414,6 +2520,9 @@ function exportPublicApiDocument() {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
+}
+.bbs-channel-row.bbs-channel-row-vertex {
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
 }
 .bbs-mini-field {
   flex: 1;
