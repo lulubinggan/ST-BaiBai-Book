@@ -4,8 +4,9 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
+import VertexSettings from './VertexSettings.vue';
 import { fetchModels, testChannel } from '@/api/client';
-import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type Verbosity } from '@/api/settings';
+import { apiSettings, newChannel, resolveVectorModel, sanitizeTagName, VERTEX_CHANNEL_ID, type ApiChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
   JAILBREAK_PROMPT,
@@ -59,6 +60,7 @@ const VERBOSITY_OPTIONS: { value: Verbosity; label: string }[] = [
 /** 任务指派下拉:空串 = 跟随主 API,其余为副渠道 id(未命名渠道给个占位名,免空白选项) */
 const channelOptions = computed(() => [
   { value: '', label: '跟随主 API' },
+  { value: VERTEX_CHANNEL_ID, label: 'Vertex AI' },
   ...apiSettings.channels.map(c => ({ value: c.id, label: c.name || '未命名渠道' })),
 ]);
 
@@ -911,6 +913,10 @@ function exportPublicApiDocument() {
           </div>
         </div>
         <p class="bbs-field-hint">推荐使用DeepSeek或豆包，不推荐Gemini，甲太厚</p>
+
+        <Collapsible title="Vertex AI" :open="false">
+          <VertexSettings />
+        </Collapsible>
 
         <hr class="bbs-rule" />
 

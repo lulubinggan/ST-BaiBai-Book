@@ -1,4 +1,6 @@
 import { getContext } from '@/st/context';
+import { normalizeVertexConnection } from './vertex';
+import { DEFAULT_VERTEX_TEXT, type VertexTextSettings } from './vertexCompletion';
 import { normalizeTemplate, type VarTemplate } from '@/memory/types';
 import { reactive, watch } from 'vue';
 import { DEFAULT_RECALL_INJECTION_DEPTH, normalizeRecallInjectionDepth } from '@/memory/vector/depth';
@@ -48,6 +50,8 @@ export interface ApiChannel {
 }
 
 export type TaskType = 'summary' | 'resummary';
+// Vertex AI 凭证和配置属于本插件，渠道同步只处理原有的共享渠道。
+export const VERTEX_CHANNEL_ID = 'bbs-vertex-ai';
 
 /** 自定义提示词:空串表示沿用 prompts.ts 内置模板,非空则整体覆盖该任务的模板。 */
 export interface CustomPrompts {
@@ -195,6 +199,7 @@ export interface ApiSettings {
   channels: ApiChannel[];
   /** 各任务指派的渠道 id */
   assignments: Record<TaskType, string>;
+  vertex: VertexTextSettings;
   /** 自动摘要开关。开启即一并启用:自动隐藏、正文时间标签、积压拦截(不再各自独立开关)。 */
   autoSummaryEnabled: boolean;
   /**
@@ -343,6 +348,7 @@ function defaults(): ApiSettings {
     },
     channels: [],
     assignments: { summary: '', resummary: '' },
+    vertex: { ...DEFAULT_VERTEX_TEXT },
     autoSummaryEnabled: true,
     summaryOnlyMode: false,
     injection: { sceneFocus: true, lifeDetails: true, protagonist: true, npcs: true, npcAffinity: true, items: true, scenes: true, knowledge: true },
@@ -373,6 +379,14 @@ function normalize(raw: unknown): ApiSettings {
   if (!raw || typeof raw !== 'object') return defaults();
   const d = defaults();
   const merged = { ...d, ...(raw as Partial<ApiSettings>) };
+  const vertex = (raw as Partial<ApiSettings>).vertex;
+  merged.vertex = {
+    ...normalizeVertexConnection(vertex, DEFAULT_VERTEX_TEXT),
+    maxTokens: typeof vertex?.maxTokens === 'number' && Number.isFinite(vertex.maxTokens) && vertex.maxTokens >= 1
+      ? Math.floor(vertex.maxTokens) : DEFAULT_VERTEX_TEXT.maxTokens,
+    timeoutSec: typeof vertex?.timeoutSec === 'number' && Number.isFinite(vertex.timeoutSec) && vertex.timeoutSec >= 1
+      ? Math.floor(vertex.timeoutSec) : DEFAULT_VERTEX_TEXT.timeoutSec,
+  };
   // prompts 是嵌套对象,展开合并不会补全缺字段,单独兜底(老数据没有 prompts 键时回退默认)
   merged.prompts = { ...d.prompts, ...((raw as Partial<ApiSettings>).prompts ?? {}) };
   // ui 同为嵌套对象,逐字段兜底(老数据没有 ui 键时回退默认,值非字符串时丢弃)
@@ -597,6 +611,7 @@ function applyInto(target: ApiSettings, src: ApiSettings): void {
   target.vector = src.vector;
   target.channels = src.channels;
   target.assignments = src.assignments;
+  target.vertex = src.vertex;
   target.autoSummaryEnabled = src.autoSummaryEnabled;
   target.summaryOnlyMode = src.summaryOnlyMode;
   target.injection = src.injection;
@@ -666,6 +681,7 @@ function applySharedChannels(store: SharedChannelsStore): void {
   sharedChannelsFingerprint = fingerprint;
 
   const ids = new Set(apiSettings.channels.map(channel => channel.id));
+  ids.add(VERTEX_CHANNEL_ID);
   if (apiSettings.assignments.summary && !ids.has(apiSettings.assignments.summary)) {
     apiSettings.assignments.summary = '';
   }
