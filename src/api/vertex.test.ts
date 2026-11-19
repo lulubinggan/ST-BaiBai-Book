@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
-import { channelTestHistory, requestCompletion, testChannel } from './client';
+import { requestCompletion, testChannel } from './client';
 import { apiSettings, getChannelForTask, hydrateSettings, newVertexChannel } from './settings';
 import { LEGACY_VERTEX_CHANNEL_ID } from './vertex';
 
@@ -81,9 +81,4 @@ it('migrates the original assignment and routes standard and Flex channels using
   expect(standardRequest).not.toHaveProperty('custom_include_body');
   expect(flexRequest.secret_id).toBe('flex-secret-id');
   expect(JSON.parse(flexRequest.custom_include_headers)).toMatchObject({ 'X-Vertex-AI-LLM-Shared-Request-Type': 'flex' });
-  expect(channelTestHistory.value).toMatchObject([
-    { mode: 'Vertex AI 标准', status: '失败' },
-    { mode: 'Vertex AI Flex', status: '成功' },
-  ]);
-  expect(JSON.stringify(channelTestHistory.value)).not.toMatch(/secret-id|Test reply|Synthetic scene/);
 });

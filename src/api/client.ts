@@ -1,5 +1,4 @@
 import { getContext } from '@/st/context';
-import { shallowRef } from 'vue';
 import type { ApiChannel, CompletionChannel } from './settings';
 import { describeFlexTraffic } from './vertex';
 import { requestVertexCompletion } from './vertexCompletion';
@@ -308,47 +307,20 @@ export async function requestViaMainApi(messages: ChatMsg[], _opts: RequestOptio
 }
 
 type ChannelTestResult = { ok: boolean; message: string };
-type ChannelTestEntry = {
-  id: number;
-  time: number;
-  channel: string;
-  model: string;
-  mode: string;
-  status: '成功' | '失败' | '已取消';
-};
-
-// 只在本次打开酒馆期间保存测试状态，不记录请求正文、响应或凭证。
-export const channelTestHistory = shallowRef<ChannelTestEntry[]>([]);
-let testSequence = 0;
 const TEST_MESSAGES: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字符即可。' }];
 
 /** 连通性测试：只发一条简短消息，摘要内容不参与测试。 */
 export async function testChannel(channel: CompletionChannel, signal?: AbortSignal): Promise<ChannelTestResult> {
-  const entry = {
-    id: ++testSequence,
-    time: Date.now(),
-    channel: channel.name || '未命名渠道',
-    model: channel.model,
-    mode: 'provider' in channel ? channel.flex ? 'Vertex AI Flex' : 'Vertex AI 标准' : '',
-  };
-  let result: ChannelTestResult;
-  try {
-    if ('provider' in channel) {
+  if ('provider' in channel) {
+    try {
       const reply = await requestVertexCompletion({ ...channel }, TEST_MESSAGES, signal);
       const traffic = channel.flex ? describeFlexTraffic(reply.trafficType) : '';
-      result = { ok: true, message: ['连通正常', reply.content.slice(0, 40), traffic].filter(Boolean).join(' · ') };
-    } else {
-      result = await testOpenAiChannel(channel, signal);
+      return { ok: true, message: ['连通正常', reply.content.slice(0, 40), traffic].filter(Boolean).join(' · ') };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
-  } catch (error) {
-    result = { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
-  const status: ChannelTestEntry['status'] = signal?.aborted ? '已取消' : result.ok ? '成功' : '失败';
-  channelTestHistory.value = [{ ...entry, status }, ...channelTestHistory.value].slice(0, 50);
-  return result;
-}
 
-async function testOpenAiChannel(channel: ApiChannel, signal?: AbortSignal): Promise<ChannelTestResult> {
   const primaryUrl = normalizeUrl(channel.url);
   try {
     const reply = await requestCompletionAtUrl(channel, TEST_MESSAGES, primaryUrl, { signal });

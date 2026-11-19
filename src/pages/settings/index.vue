@@ -5,7 +5,7 @@ import BbsSelect from '@/components/BbsSelect.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import VertexCredentials from '@/components/VertexCredentials.vue';
-import { channelTestHistory, fetchModels, testChannel } from '@/api/client';
+import { fetchModels, testChannel } from '@/api/client';
 import { clearVertexCredential, hasVertexCredential, VERTEX_MODELS } from '@/api/vertex';
 import { apiSettings, newChannel, newVertexChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type CompletionChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
@@ -984,21 +984,7 @@ function exportPublicApiDocument() {
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">添加渠道后，即可为摘要或总结选择使用的 API。</p>
-
-        <div class="bbs-channel-history">
-          <Collapsible title="请求历史" :open="false">
-            <p class="bbs-field-hint">保留本次会话最近 50 条渠道测试。</p>
-            <ul v-if="channelTestHistory.length" class="bbs-channel-list">
-              <li v-for="entry in channelTestHistory" :key="entry.id" class="bbs-test-entry">
-                <strong>连通性测试 · {{ entry.status }}</strong>
-                <span>{{ [entry.channel, entry.model, entry.mode].filter(Boolean).join(' · ') }}</span>
-                <time :datetime="new Date(entry.time).toISOString()">{{ new Date(entry.time).toLocaleTimeString() }}</time>
-              </li>
-            </ul>
-            <p v-else class="bbs-field-hint">暂无渠道测试记录。</p>
-          </Collapsible>
-        </div>
+        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
       </Collapsible>
 
       <!-- 摘要设置 -->
@@ -1798,8 +1784,7 @@ function exportPublicApiDocument() {
                   :key="m"
                   class="bbs-combo-item"
                   :class="{ 'is-active': m === editingChannel.model }"
-                  @mousedown.prevent
-                  @click="pickModel(m)"
+                  @mousedown.prevent="pickModel(m)"
                 >
                   {{ m }}
                 </li>
@@ -2395,25 +2380,6 @@ function exportPublicApiDocument() {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-}
-.bbs-channel-history {
-  margin-top: 12px;
-}
-.bbs-test-entry {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 12px;
-  padding: 8px 0;
-  font-size: 12px;
-  border-bottom: 1px solid var(--bbs-line);
-}
-.bbs-test-entry span {
-  grid-area: 2 / 1 / 3 / -1;
-  color: var(--bbs-ink-muted);
-  overflow-wrap: anywhere;
-}
-.bbs-test-entry time {
-  color: var(--bbs-ink-muted);
 }
 
 /* 渠道:紧凑只读列表,每渠道一行,点行进弹窗编辑 */
