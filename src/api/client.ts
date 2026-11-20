@@ -95,7 +95,7 @@ export async function requestCompletion(
   messages: ChatMsg[],
   opts: RequestOptions = {},
 ): Promise<string> {
-  if ('provider' in channel) return (await requestVertexCompletion(channel, messages, opts.signal)).content;
+  if ('provider' in channel) return (await requestVertexCompletion(channel, messages, { signal: opts.signal })).content;
   return requestCompletionAtUrl(channel, messages, normalizeUrl(channel.url), opts);
 }
 
@@ -313,7 +313,7 @@ const TEST_MESSAGES: ChatMsg[] = [{ role: 'user', content: '回复"ok"两个字�
 export async function testChannel(channel: CompletionChannel, signal?: AbortSignal): Promise<ChannelTestResult> {
   if ('provider' in channel) {
     try {
-      const reply = await requestVertexCompletion({ ...channel }, TEST_MESSAGES, signal);
+      const reply = await requestVertexCompletion({ ...channel }, TEST_MESSAGES, { signal, connectivityTest: true });
       const traffic = channel.flex ? describeFlexTraffic(reply.trafficType) : '';
       return { ok: true, message: ['连通正常', reply.content.slice(0, 40), traffic].filter(Boolean).join(' · ') };
     } catch (error) {

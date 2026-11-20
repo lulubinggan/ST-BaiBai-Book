@@ -52,6 +52,7 @@ it('migrates the original assignment and routes standard and Flex channels using
   } as unknown as STContext);
   const fetchMock = vi.fn<typeof fetch>()
     .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: 'Synthetic summary' } }] }))
+    .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: 'Synthetic resummary' } }] }))
     .mockResolvedValueOnce(Response.json({
       choices: [{ message: { content: 'Test reply' } }],
       usageMetadata: { trafficType: 'ON_DEMAND_FLEX' },
@@ -66,19 +67,27 @@ it('migrates the original assignment and routes standard and Flex channels using
   expect(extensionSettings.baibai_book).not.toHaveProperty('vertex');
   apiSettings.vertexChannels.push(flexChannel);
   apiSettings.assignments.resummary = flexChannel.id;
-  expect(getChannelForTask('resummary')?.id).toBe(flexChannel.id);
+  const resummaryChannel = getChannelForTask('resummary');
+  expect(resummaryChannel).toMatchObject({ id: flexChannel.id, model: flexChannel.model, maxTokens: 65535 });
 
   const messages = [{ role: 'system' as const, content: 'Summarize the scene' }, { role: 'user' as const, content: 'Synthetic scene' }];
-  if (!standardChannel) throw new Error('Missing migrated Vertex channel');
+  if (!standardChannel || !resummaryChannel) throw new Error('Missing assigned Vertex channel');
   expect(await requestCompletion(standardChannel, messages)).toBe('Synthetic summary');
+  expect(await requestCompletion(resummaryChannel, messages)).toBe('Synthetic resummary');
   expect(await testChannel(flexChannel)).toMatchObject({ ok: true, message: expect.stringContaining('Flex 已确认') });
   expect(await testChannel(standardChannel)).toMatchObject({ ok: false, message: expect.stringContaining('403') });
 
-  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Array(3).fill('/api/backends/chat-completions/generate'));
-  const [standardRequest, flexRequest] = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Array(4).fill('/api/backends/chat-completions/generate'));
+  const [standardRequest, flexRequest, flexTest, standardTest] =
+    fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
   expect(standardRequest).toMatchObject({ secret_id: 'standard-secret-id', max_tokens: 4096, messages, use_sysprompt: true });
   expect(standardRequest).not.toHaveProperty('custom_include_headers');
   expect(standardRequest).not.toHaveProperty('custom_include_body');
-  expect(flexRequest.secret_id).toBe('flex-secret-id');
+  expect(standardRequest).not.toHaveProperty('tool_choice');
+  expect(flexRequest).toMatchObject({ secret_id: 'flex-secret-id', max_tokens: 65535, messages, use_sysprompt: true });
+  expect(flexRequest).not.toHaveProperty('tool_choice');
+  expect(flexRequest).not.toHaveProperty('custom_include_body');
   expect(JSON.parse(flexRequest.custom_include_headers)).toMatchObject({ 'X-Vertex-AI-LLM-Shared-Request-Type': 'flex' });
+  expect(flexTest.tool_choice).toBe('none');
+  expect(standardTest.tool_choice).toBe('none');
 });
