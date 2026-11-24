@@ -119,6 +119,13 @@ const testStatus = ref<'idle' | 'running' | 'ok' | 'error'>('idle');
 let testController: AbortController | null = null;
 const vertexFlexWarning = computed(() => (vertexDraft.value ? vertexFlexError(vertexDraft.value) : ''));
 
+const vertexReasoningEffort = computed<string>({
+  get: () => vertexDraft.value?.reasoningEffort ?? '',
+  set: v => {
+    if (vertexDraft.value) vertexDraft.value.reasoningEffort = v;
+  },
+});
+
 function setVertexPriority(checked: boolean) {
   if (!vertexDraft.value) return;
   vertexDraft.value.priority = checked;
@@ -155,7 +162,9 @@ function openChannel(id: string) {
   const src = allChannels.value.find(c => c.id === id);
   if (!src) return;
   editingId.value = id;
-  editingChannel.value = 'provider' in src ? { ...src } : { ...src, excludeParams: [...src.excludeParams] };
+  editingChannel.value = 'provider' in src
+    ? { ...src, reasoningEffort: src.reasoningEffort ?? '' }
+    : { ...src, excludeParams: [...src.excludeParams] };
 }
 function resetChannelEditor() {
   testController?.abort();
@@ -1889,8 +1898,16 @@ function exportPublicApiDocument() {
                 :max="vertexDraft.flex ? 1800 : undefined"
               />
             </label>
+            <div class="bbs-mini-field">
+              <span>思考强度</span>
+              <BbsSelect
+                v-model="vertexReasoningEffort"
+                :options="REASONING_EFFORT_OPTIONS"
+                aria-label="思考强度"
+              />
+            </div>
           </div>
-          <p class="bbs-field-hint vx-compact-hint">超时填 0 使用默认（标准 / 优先通道 180 秒，Flex 600 秒）。</p>
+          <p class="bbs-field-hint vx-compact-hint">超时填 0 使用默认（标准 / 优先 180 秒，Flex 600 秒）；思考强度不知道就选 auto。</p>
 
           <div class="vx-tier-card">
             <label class="vx-tier-row">
@@ -2831,7 +2848,7 @@ function exportPublicApiDocument() {
   gap: 10px;
 }
 .bbs-channel-row.bbs-channel-row-vertex {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
 }
 .bbs-mini-field {
   flex: 1;
@@ -2841,6 +2858,12 @@ function exportPublicApiDocument() {
   gap: 4px;
   font-size: 12px;
   color: var(--bbs-ink-muted);
+}
+.bbs-mini-field :deep(.bbs-select-box) {
+  width: 100%;
+}
+.bbs-mini-field :deep(.bbs-select-trigger) {
+  padding: 7px 10px;
 }
 .bbs-channel-test {
   margin: 0;

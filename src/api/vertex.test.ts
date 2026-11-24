@@ -92,8 +92,8 @@ it('migrates the original assignment and routes standard and Flex channels using
   expect(standardTest.tool_choice).toBe('none');
 });
 
-it('sends Priority PayGo headers, enforces Flex mutual exclusion, and exposes region presets', async () => {
-  const priorityChannel = { ...newVertexChannel(), location: 'eu', priority: true };
+it('sends Priority PayGo headers, reasoning_effort, catches [API 错误], and keeps global/us/eu presets', async () => {
+  const priorityChannel = { ...newVertexChannel(), location: 'eu', priority: true, reasoningEffort: 'low' };
   vi.stubGlobal('__TAURITAVERN__', {});
   vi.stubGlobal('indexedDB', {
     open: () => {
@@ -118,13 +118,18 @@ it('sends Priority PayGo headers, enforces Flex mutual exclusion, and exposes re
   vi.spyOn(context, 'getContext').mockReturnValue({
     getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
   } as unknown as STContext);
-  const fetchMock = vi.fn<typeof fetch>(async (_url, options) => {
-    const body = JSON.parse(String(options?.body));
-    return Response.json({
-      choices: [{ message: { content: body.tool_choice === 'none' ? 'OK' : 'Priority summary' } }],
+  const fetchMock = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: 'Priority summary' } }],
       usageMetadata: { trafficType: 'ON_DEMAND_PRIORITY' },
-    });
-  });
+    }))
+    .mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: 'OK' } }],
+      usageMetadata: { trafficType: 'ON_DEMAND_PRIORITY' },
+    }))
+    .mockResolvedValueOnce(Response.json({
+      choices: [{ message: { content: '[API 错误] Google Vertex AI endpoint failed with status 429' } }],
+    }));
   vi.stubGlobal('fetch', fetchMock);
 
   const messages = [{ role: 'user' as const, content: 'Summarize' }];
@@ -133,15 +138,18 @@ it('sends Priority PayGo headers, enforces Flex mutual exclusion, and exposes re
     ok: true,
     message: '连通正常 · OK · 优先通道已确认',
   });
+  expect(await testChannel(priorityChannel)).toEqual({
+    ok: false,
+    message: expect.stringContaining('429'),
+  });
   const [req] = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
   expect(req.vertexai_region).toBe('eu');
+  expect(req.reasoning_effort).toBe('low');
   expect(JSON.parse(req.custom_include_headers)).toEqual({
     'X-Vertex-AI-LLM-Request-Type': 'shared',
     'X-Vertex-AI-LLM-Shared-Request-Type': 'priority',
   });
-  expect(VERTEX_LOCATIONS.map(loc => loc.value)).toEqual(
-    expect.arrayContaining(['global', 'us', 'eu']),
-  );
+  expect(VERTEX_LOCATIONS.map(loc => loc.value)).toEqual(['global', 'us', 'eu']);
   expect(normalizeVertexConnection({ flex: true, priority: true }, priorityChannel)).toMatchObject({
     flex: true,
     priority: false,
