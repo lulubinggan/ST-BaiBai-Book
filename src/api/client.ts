@@ -1,6 +1,6 @@
 import { getContext } from '@/st/context';
 import type { ApiChannel, CompletionChannel } from './settings';
-import { describeFlexTraffic } from './vertex';
+import { describeTrafficTier } from './vertex';
 import { requestVertexCompletion } from './vertexCompletion';
 
 /**
@@ -314,7 +314,7 @@ export async function testChannel(channel: CompletionChannel, signal?: AbortSign
   if ('provider' in channel) {
     try {
       const reply = await requestVertexCompletion({ ...channel }, TEST_MESSAGES, { signal, connectivityTest: true });
-      const traffic = channel.flex ? describeFlexTraffic(reply.trafficType) : '';
+      const traffic = describeTrafficTier(channel, reply.trafficType);
       return { ok: true, message: ['连通正常', reply.content.slice(0, 40), traffic].filter(Boolean).join(' · ') };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };

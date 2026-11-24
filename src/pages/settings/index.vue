@@ -6,7 +6,13 @@ import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import VertexCredentials from '@/components/VertexCredentials.vue';
 import { fetchModels, testChannel } from '@/api/client';
-import { clearVertexCredential, hasVertexCredential, VERTEX_MODELS } from '@/api/vertex';
+import {
+  clearVertexCredential,
+  hasVertexCredential,
+  VERTEX_LOCATIONS,
+  VERTEX_MODELS,
+  vertexFlexError,
+} from '@/api/vertex';
 import { apiSettings, newChannel, newVertexChannel, resolveVectorModel, sanitizeTagName, type ApiChannel, type CompletionChannel, type Verbosity } from '@/api/settings';
 import { getContext } from '@/st/context';
 import {
@@ -109,7 +115,23 @@ const editorBusy = ref(false);
 const channelBusy = computed(() => credentialsBusy.value || editorBusy.value);
 const testRunning = ref(false);
 const testMessage = ref('');
+const testStatus = ref<'idle' | 'running' | 'ok' | 'error'>('idle');
 let testController: AbortController | null = null;
+const vertexFlexWarning = computed(() => (vertexDraft.value ? vertexFlexError(vertexDraft.value) : ''));
+
+function setVertexPriority(checked: boolean) {
+  if (!vertexDraft.value) return;
+  vertexDraft.value.priority = checked;
+  if (checked) vertexDraft.value.flex = false;
+}
+function setVertexFlex(checked: boolean) {
+  if (!vertexDraft.value) return;
+  vertexDraft.value.flex = checked;
+  if (checked) vertexDraft.value.priority = false;
+}
+function isVertexModelFlex(id: string): boolean | undefined {
+  return VERTEX_MODELS.find(m => m.id === id)?.flex;
+}
 // 密钥默认隐藏;每次打开/关闭弹窗都复位,避免密钥意外保持明文
 const showKey = ref(false);
 
@@ -138,6 +160,7 @@ function openChannel(id: string) {
 function resetChannelEditor() {
   testController?.abort();
   testMessage.value = '';
+  testStatus.value = 'idle';
   modelMenuOpen.value = false;
   modelQuery.value = '';
   showKey.value = false;
@@ -226,14 +249,19 @@ async function doTest(ch: CompletionChannel) {
   testController = controller;
   testRunning.value = true;
   testMessage.value = '测试中…';
+  testStatus.value = 'running';
   try {
     if ('provider' in ch && vertexCredentials.value && !await vertexCredentials.value.savePending()) {
       testMessage.value = '';
+      testStatus.value = 'idle';
       return;
     }
     if (controller.signal.aborted) return;
     const result = await testChannel(ch, controller.signal);
-    if (!controller.signal.aborted) testMessage.value = result.message;
+    if (!controller.signal.aborted) {
+      testMessage.value = result.message;
+      testStatus.value = result.ok ? 'ok' : 'error';
+    }
   } finally {
     testController = null;
     testRunning.value = false;
@@ -970,8 +998,8 @@ function exportPublicApiDocument() {
             <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('openai')">
               <Icon name="plus" /> 添加渠道
             </button>
-            <button class="bbs-btn bbs-btn-primary bbs-btn-sm" type="button" @click="addChannel('vertex')">
-              <Icon name="plus" /> 添加 Vertex AI 渠道
+            <button class="bbs-btn bbs-btn-vertex bbs-btn-sm" type="button" @click="addChannel('vertex')">
+              <Icon name="sparkles" /> Vertex AI
             </button>
           </div>
         </div>
@@ -979,12 +1007,22 @@ function exportPublicApiDocument() {
         <ul v-if="allChannels.length" class="bbs-channel-list">
           <li v-for="ch in allChannels" :key="ch.id" class="bbs-channel-item">
             <button class="bbs-channel-open" type="button" @click="openChannel(ch.id)">
-              <span class="bbs-channel-item-name">{{ ch.name || '未命名渠道' }}</span>
-              <span class="bbs-channel-item-model">{{ ch.model || '未设模型' }}</span>
+              <span class="bbs-channel-item-main">
+                <span class="bbs-channel-item-name">{{ ch.name || '未命名渠道' }}</span>
+                <span v-if="'provider' in ch" class="vx-chip vx-chip-provider">Vertex</span>
+              </span>
+              <span class="bbs-channel-item-meta">
+                <template v-if="'provider' in ch">
+                  <span class="vx-chip">{{ ch.location || 'global' }}</span>
+                  <span v-if="ch.priority" class="vx-chip vx-chip-priority">优先</span>
+                  <span v-else-if="ch.flex" class="vx-chip vx-chip-flex">Flex</span>
+                </template>
+                <span class="bbs-channel-item-model">{{ ch.model || '未设模型' }}</span>
+              </span>
             </button>
           </li>
         </ul>
-        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」配置摘要/总结要用的 API。</p>
+        <p v-else class="bbs-field-hint">还没有渠道。点「添加渠道」或「Vertex AI」配置摘要/总结要用的 API。</p>
       </Collapsible>
 
       <!-- 摘要设置 -->
@@ -1723,13 +1761,18 @@ function exportPublicApiDocument() {
     <ModalMask :open="!!editingChannel" @close="closeChannel">
       <div v-if="editingChannel" class="bbs-modal" role="dialog" aria-modal="true" aria-label="编辑渠道">
         <header class="bbs-modal-head">
-          <span class="bbs-modal-title">编辑渠道</span>
+          <div class="vx-modal-title-group">
+            <span class="bbs-modal-title">
+              {{ editingId ? '编辑' : '添加' }}{{ vertexDraft ? ' Vertex AI 渠道' : '渠道' }}
+            </span>
+            <span v-if="vertexDraft" class="vx-chip vx-chip-provider">Vertex AI</span>
+          </div>
           <button class="bbs-icon-mini" type="button" title="关闭" :disabled="channelBusy" @click="closeChannel"><Icon name="close" /></button>
         </header>
 
         <label class="bbs-modal-field">
           <span class="bbs-modal-label">渠道名</span>
-          <input v-model="editingChannel.name" class="bbs-input" placeholder="渠道名" />
+          <input v-model="editingChannel.name" class="bbs-input" :placeholder="vertexDraft ? '如 Vertex AI · 赠金' : '渠道名'" />
         </label>
         <VertexCredentials
           v-if="vertexDraft"
@@ -1771,6 +1814,7 @@ function exportPublicApiDocument() {
                 v-model="editingChannel.model"
                 class="bbs-input"
                 :placeholder="modelList.length ? '搜索或输入模型名…' : '模型名,如 gpt-4o-mini'"
+                :spellcheck="!vertexDraft"
                 @focus="openModelMenu"
                 @input="modelQuery = editingChannel.model; modelMenuOpen = true"
                 @blur="closeModelMenuSoon"
@@ -1786,7 +1830,8 @@ function exportPublicApiDocument() {
                   :class="{ 'is-active': m === editingChannel.model }"
                   @mousedown.prevent="pickModel(m)"
                 >
-                  {{ m }}
+                  <span class="bbs-combo-item-text">{{ m }}</span>
+                  <span v-if="vertexDraft && isVertexModelFlex(m)" class="vx-chip vx-chip-flex">Flex</span>
                 </li>
               </ul>
             </div>
@@ -1802,56 +1847,155 @@ function exportPublicApiDocument() {
             </button>
           </div>
         </label>
-        <div class="bbs-channel-row" :class="{ 'bbs-channel-row-vertex': vertexDraft }">
-          <label v-if="openAiDraft" class="bbs-mini-field">
-            <span>温度</span>
-            <input v-model.number="openAiDraft.temperature" class="bbs-input" type="number" step="0.1" min="0" max="2" />
-          </label>
-          <label v-if="vertexDraft" class="bbs-mini-field">
-            <span>地区</span>
-            <input v-model.trim="vertexDraft.location" class="bbs-input" placeholder="global" />
-          </label>
-          <label class="bbs-mini-field">
-            <span>最大 token</span>
-            <input v-model.number="editingChannel.maxTokens" class="bbs-input" type="number" :step="vertexDraft ? 1 : 256" :min="vertexDraft ? 1 : 256" />
-          </label>
-          <label class="bbs-mini-field">
-            <span>超时(秒)</span>
-            <input v-model.number="editingChannel.timeoutSec" class="bbs-input" type="number" :step="vertexDraft ? 1 : 10"
-              :min="vertexDraft ? 0 : 1" :max="vertexDraft?.flex ? 1800 : undefined" />
-          </label>
-          <!-- 思考强度:自绘下拉(跟随主题;原生 select 的弹出层由系统渲染,主题管不到)。
-               auto 是显式选项,值为空串 = 不发送该参数 -->
-          <div v-if="openAiDraft" class="bbs-mini-field">
-            <span>思考强度</span>
-            <BbsSelect
-              v-model="openAiDraft.reasoningEffort"
-              :options="REASONING_EFFORT_OPTIONS"
-              aria-label="思考强度"
+
+        <!-- Vertex AI 专属：地区快捷切换 + 参数 + 通道模式卡片 -->
+        <template v-if="vertexDraft">
+          <div class="bbs-modal-field vx-location-field">
+            <span class="bbs-modal-label">地区（Location）</span>
+            <div class="vx-loc-pills" role="group" aria-label="常用地区快捷选择">
+              <button
+                v-for="loc in VERTEX_LOCATIONS"
+                :key="loc.value"
+                type="button"
+                class="vx-loc-pill"
+                :class="{ 'is-on': (vertexDraft.location.trim() || 'global') === loc.value }"
+                @click="vertexDraft.location = loc.value"
+              >
+                <span class="vx-loc-code">{{ loc.label }}</span>
+                <span class="vx-loc-note">{{ loc.note }}</span>
+              </button>
+            </div>
+            <input
+              v-model.trim="vertexDraft.location"
+              class="bbs-input vx-loc-input"
+              placeholder="常用 global / us / eu，或输入自定义地区如 asia-northeast1"
+              spellcheck="false"
             />
           </div>
-        </div>
-        <span v-if="openAiDraft" class="bbs-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
-        <span v-else class="bbs-field-hint">超时填 0 时使用默认值，标准 180 秒，Flex 600 秒。</span>
-        <label v-if="vertexDraft" class="bbs-switch-row">
-          <span class="bbs-modal-label">Flex 模式（需使用 global）</span>
-          <input v-model="vertexDraft.flex" type="checkbox" class="bbs-checkbox" />
-        </label>
-        <label v-if="openAiDraft" class="bbs-switch-row">
-          <span class="bbs-modal-label">流式传输</span>
-          <input v-model="openAiDraft.stream" type="checkbox" class="bbs-checkbox" />
-        </label>
-        <label v-if="openAiDraft" class="bbs-modal-field">
-          <span class="bbs-modal-label">排除参数</span>
-          <input
-            v-model="excludeParamsText"
-            class="bbs-input"
-            type="text"
-            placeholder="逗号分隔,如 temperature, max_tokens"
-          />
-          <span class="bbs-field-hint">这些参数会在发请求前从请求体里删除,用于规避不接受该参数的兼容端点报错。逗号分隔,留空则不排除。</span>
-        </label>
-        <p v-if="testMessage" class="bbs-channel-test" role="status">{{ testMessage }}</p>
+
+          <div class="bbs-channel-row bbs-channel-row-vertex">
+            <label class="bbs-mini-field">
+              <span>最大 token</span>
+              <input v-model.number="vertexDraft.maxTokens" class="bbs-input" type="number" step="1" min="1" />
+            </label>
+            <label class="bbs-mini-field">
+              <span>超时(秒)</span>
+              <input
+                v-model.number="vertexDraft.timeoutSec"
+                class="bbs-input"
+                type="number"
+                step="10"
+                min="0"
+                :max="vertexDraft.flex ? 1800 : undefined"
+              />
+            </label>
+          </div>
+          <p class="bbs-field-hint vx-compact-hint">超时填 0 使用默认（标准 / 优先通道 180 秒，Flex 600 秒）。</p>
+
+          <div class="vx-tier-card">
+            <label class="vx-tier-row">
+              <span class="vx-tier-info">
+                <span class="vx-tier-title-line">
+                  <span class="vx-tier-name">优先通道（Priority PayGo）</span>
+                  <span class="vx-chip vx-chip-priority">1.8× 计费 · 降 429</span>
+                </span>
+                <span class="vx-tier-desc">
+                  附带 <code>X-Vertex-AI-LLM-Shared-Request-Type: priority</code>，高峰期优先排队、减少 429/PVP；无优先容量时自动回落标准 1×。
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                class="bbs-checkbox"
+                :checked="vertexDraft.priority"
+                @change="setVertexPriority(($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+
+            <hr class="vx-tier-divider" />
+
+            <label class="vx-tier-row">
+              <span class="vx-tier-info">
+                <span class="vx-tier-title-line">
+                  <span class="vx-tier-name">Flex 模式（Flex PayGo）</span>
+                  <span class="vx-chip vx-chip-flex">折扣 · 仅 global</span>
+                </span>
+                <span class="vx-tier-desc">
+                  低成本弹性队列，仅支持 <code>global</code> 地区与部分模型，响应延迟较高。
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                class="bbs-checkbox"
+                :checked="vertexDraft.flex"
+                @change="setVertexFlex(($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+
+            <div v-if="vertexFlexWarning" class="vx-tier-warn" role="alert">
+              <span>{{ vertexFlexWarning }}</span>
+              <button
+                v-if="(vertexDraft.location.trim() || 'global') !== 'global'"
+                type="button"
+                class="vx-warn-btn"
+                @click="vertexDraft.location = 'global'"
+              >
+                切到 global
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- OpenAI 兼容渠道专属参数 -->
+        <template v-if="openAiDraft">
+          <div class="bbs-channel-row">
+            <label class="bbs-mini-field">
+              <span>温度</span>
+              <input v-model.number="openAiDraft.temperature" class="bbs-input" type="number" step="0.1" min="0" max="2" />
+            </label>
+            <label class="bbs-mini-field">
+              <span>最大 token</span>
+              <input v-model.number="openAiDraft.maxTokens" class="bbs-input" type="number" step="256" min="256" />
+            </label>
+            <label class="bbs-mini-field">
+              <span>超时(秒)</span>
+              <input v-model.number="openAiDraft.timeoutSec" class="bbs-input" type="number" step="10" min="1" />
+            </label>
+            <!-- 思考强度:自绘下拉(跟随主题;原生 select 的弹出层由系统渲染,主题管不到)。
+                 auto 是显式选项,值为空串 = 不发送该参数 -->
+            <div class="bbs-mini-field">
+              <span>思考强度</span>
+              <BbsSelect
+                v-model="openAiDraft.reasoningEffort"
+                :options="REASONING_EFFORT_OPTIONS"
+                aria-label="思考强度"
+              />
+            </div>
+          </div>
+          <span class="bbs-field-hint">思考强度不知道的就选 auto，DS 系推荐 max</span>
+          <label class="bbs-switch-row">
+            <span class="bbs-modal-label">流式传输</span>
+            <input v-model="openAiDraft.stream" type="checkbox" class="bbs-checkbox" />
+          </label>
+          <label class="bbs-modal-field">
+            <span class="bbs-modal-label">排除参数</span>
+            <input
+              v-model="excludeParamsText"
+              class="bbs-input"
+              type="text"
+              placeholder="逗号分隔,如 temperature, max_tokens"
+            />
+            <span class="bbs-field-hint">这些参数会在发请求前从请求体里删除,用于规避不接受该参数的兼容端点报错。逗号分隔,留空则不排除。</span>
+          </label>
+        </template>
+
+        <p
+          v-if="testMessage"
+          class="bbs-channel-test"
+          :class="{ 'is-ok': testStatus === 'ok', 'is-error': testStatus === 'error' }"
+          role="status"
+        >
+          {{ testMessage }}
+        </p>
 
         <footer class="bbs-modal-foot">
           <!-- 删除靠左、与右侧主操作拉开,破坏性动作不与「完成」相邻,降低误触。
@@ -2293,12 +2437,19 @@ function exportPublicApiDocument() {
   box-shadow: var(--bbs-shadow);
 }
 .bbs-combo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 7px 9px;
   border-radius: var(--bbs-radius-sm);
   font-size: 12.5px;
   color: var(--bbs-ink);
   cursor: pointer;
   word-break: break-all;
+}
+.bbs-combo-item-text {
+  min-width: 0;
 }
 .bbs-combo-item:hover {
   background: var(--bbs-surface-2);
@@ -2381,6 +2532,15 @@ function exportPublicApiDocument() {
   flex-wrap: wrap;
   gap: 8px;
 }
+.bbs-btn-vertex {
+  color: var(--bbs-accent);
+  border-color: var(--bbs-accent);
+  background: var(--bbs-accent-soft);
+}
+.bbs-btn-vertex:hover {
+  background: var(--bbs-accent);
+  color: var(--bbs-accent-ink);
+}
 
 /* 渠道:紧凑只读列表,每渠道一行,点行进弹窗编辑 */
 .bbs-channel-list {
@@ -2418,13 +2578,29 @@ function exportPublicApiDocument() {
   border-color: var(--bbs-accent);
   background: var(--bbs-surface);
 }
+.bbs-channel-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
 /* 渠道名:完整显示,允许换行,占据剩余空间 */
 .bbs-channel-item-name {
-  flex: 1 1 auto;
   min-width: 0;
   font-size: 14px;
   font-weight: 600;
   word-break: break-word;
+}
+.bbs-channel-item-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 /* 模型名:次要信息,过长则截断,不挤占名字 */
 .bbs-channel-item-model {
@@ -2436,6 +2612,173 @@ function exportPublicApiDocument() {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* —— Vertex AI 专属徽标 / 地区快捷条 / 通道卡片 —— */
+.vx-modal-title-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.vx-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: var(--bbs-radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--bbs-ink-soft);
+  background: var(--bbs-surface);
+  border: 1px solid var(--bbs-line);
+}
+.vx-chip-provider {
+  color: var(--bbs-accent);
+  background: var(--bbs-accent-soft);
+  border-color: transparent;
+}
+.vx-chip-priority {
+  color: var(--bbs-warning);
+  background: var(--bbs-warning-soft);
+  border-color: transparent;
+}
+.vx-chip-flex {
+  color: var(--bbs-ink-soft);
+  background: var(--bbs-surface-2);
+  border-color: var(--bbs-line);
+}
+.vx-location-field {
+  gap: 6px;
+}
+.vx-loc-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.vx-loc-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--bbs-line-strong);
+  border-radius: var(--bbs-radius-pill);
+  background: var(--bbs-surface);
+  color: var(--bbs-ink-soft);
+  font-family: var(--bbs-font-sans);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color var(--bbs-dur) var(--bbs-ease),
+    border-color var(--bbs-dur) var(--bbs-ease),
+    background var(--bbs-dur) var(--bbs-ease);
+}
+.vx-loc-pill:hover {
+  border-color: var(--bbs-accent);
+  color: var(--bbs-ink);
+}
+.vx-loc-pill.is-on {
+  border-color: var(--bbs-accent);
+  background: var(--bbs-accent-soft);
+  color: var(--bbs-accent);
+  font-weight: 600;
+}
+.vx-loc-code {
+  font-family: var(--bbs-font-mono);
+  font-size: 11.5px;
+}
+.vx-loc-note {
+  font-size: 11px;
+  opacity: 0.78;
+}
+.vx-loc-input {
+  font-family: var(--bbs-font-mono);
+  font-size: 12.5px;
+}
+.vx-compact-hint {
+  margin: -6px 0 0;
+}
+.vx-tier-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--bbs-line);
+  border-radius: var(--bbs-radius);
+  background: var(--bbs-surface-2);
+}
+.vx-tier-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.vx-tier-row .bbs-checkbox {
+  margin-top: 2px;
+}
+.vx-tier-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.vx-tier-title-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.vx-tier-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bbs-ink);
+}
+.vx-tier-desc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--bbs-ink-muted);
+}
+.vx-tier-desc code {
+  font-family: var(--bbs-font-mono);
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bbs-surface);
+  color: var(--bbs-ink-soft);
+}
+.vx-tier-divider {
+  height: 1px;
+  margin: 0;
+  border: 0;
+  background: var(--bbs-line);
+}
+.vx-tier-warn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--bbs-radius-sm);
+  background: var(--bbs-warning-soft);
+  color: var(--bbs-warning);
+  font-size: 12px;
+}
+.vx-warn-btn {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid currentColor;
+  border-radius: var(--bbs-radius-pill);
+  background: transparent;
+  color: inherit;
+  font-family: var(--bbs-font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.vx-warn-btn:hover {
+  background: var(--bbs-surface);
 }
 /* 弹窗底部:spacer 把删除键推到最左,与右侧操作分隔 */
 .bbs-modal-foot-spacer {
@@ -2488,7 +2831,7 @@ function exportPublicApiDocument() {
   gap: 10px;
 }
 .bbs-channel-row.bbs-channel-row-vertex {
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
 }
 .bbs-mini-field {
   flex: 1;
@@ -2500,10 +2843,25 @@ function exportPublicApiDocument() {
   color: var(--bbs-ink-muted);
 }
 .bbs-channel-test {
-  margin: 2px 0 0;
+  margin: 0;
+  padding: 8px 11px;
+  border-radius: var(--bbs-radius-sm);
+  border: 1px solid var(--bbs-line);
+  background: var(--bbs-surface-2);
   font-size: 12px;
+  line-height: 1.5;
   color: var(--bbs-ink-soft);
-  word-break: break-all;
+  word-break: break-word;
+}
+.bbs-channel-test.is-ok {
+  border-color: transparent;
+  background: var(--bbs-accent-soft);
+  color: var(--bbs-accent);
+}
+.bbs-channel-test.is-error {
+  border-color: transparent;
+  background: var(--bbs-danger-soft);
+  color: var(--bbs-danger);
 }
 
 /* 摘要设置控件 */

@@ -3,7 +3,7 @@ import * as context from '@/st/context';
 import type { STContext } from '@/st/context';
 import { requestCompletion, testChannel } from './client';
 import { apiSettings, getChannelForTask, hydrateSettings, newVertexChannel } from './settings';
-import { LEGACY_VERTEX_CHANNEL_ID } from './vertex';
+import { LEGACY_VERTEX_CHANNEL_ID, normalizeVertexConnection, VERTEX_LOCATIONS } from './vertex';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -90,4 +90,60 @@ it('migrates the original assignment and routes standard and Flex channels using
   expect(JSON.parse(flexRequest.custom_include_headers)).toMatchObject({ 'X-Vertex-AI-LLM-Shared-Request-Type': 'flex' });
   expect(flexTest.tool_choice).toBe('none');
   expect(standardTest.tool_choice).toBe('none');
+});
+
+it('sends Priority PayGo headers, enforces Flex mutual exclusion, and exposes region presets', async () => {
+  const priorityChannel = { ...newVertexChannel(), location: 'eu', priority: true };
+  vi.stubGlobal('__TAURITAVERN__', {});
+  vi.stubGlobal('indexedDB', {
+    open: () => {
+      const request = {
+        onsuccess: () => {},
+        result: {
+          close: () => {},
+          transaction: () => {
+            const tx = {
+              oncomplete: () => {},
+              objectStore: () => ({ get: () => ({ result: { tauriSecretId: 'priority-secret-id' } }) }),
+            };
+            queueMicrotask(() => tx.oncomplete());
+            return tx;
+          },
+        },
+      };
+      queueMicrotask(() => request.onsuccess());
+      return request;
+    },
+  });
+  vi.spyOn(context, 'getContext').mockReturnValue({
+    getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+  } as unknown as STContext);
+  const fetchMock = vi.fn<typeof fetch>(async (_url, options) => {
+    const body = JSON.parse(String(options?.body));
+    return Response.json({
+      choices: [{ message: { content: body.tool_choice === 'none' ? 'OK' : 'Priority summary' } }],
+      usageMetadata: { trafficType: 'ON_DEMAND_PRIORITY' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+
+  const messages = [{ role: 'user' as const, content: 'Summarize' }];
+  expect(await requestCompletion(priorityChannel, messages)).toBe('Priority summary');
+  expect(await testChannel(priorityChannel)).toEqual({
+    ok: true,
+    message: '连通正常 · OK · 优先通道已确认',
+  });
+  const [req] = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+  expect(req.vertexai_region).toBe('eu');
+  expect(JSON.parse(req.custom_include_headers)).toEqual({
+    'X-Vertex-AI-LLM-Request-Type': 'shared',
+    'X-Vertex-AI-LLM-Shared-Request-Type': 'priority',
+  });
+  expect(VERTEX_LOCATIONS.map(loc => loc.value)).toEqual(
+    expect.arrayContaining(['global', 'us', 'eu']),
+  );
+  expect(normalizeVertexConnection({ flex: true, priority: true }, priorityChannel)).toMatchObject({
+    flex: true,
+    priority: false,
+  });
 });
